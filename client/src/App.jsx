@@ -10,9 +10,12 @@ const CANVAS_H = 540;
 
 // Red obstacle cars scattered in the middle of the road
 const OBSTACLES = [
-  { x: 270, y: 130 },
-  { x: 400, y: 290 },
-  { x: 270, y: 440 },
+  { x: 220, y: 130 },
+  { x: 320, y: 290 },
+  { x: 250, y: 440 },
+  { x: 450, y: 160 },
+  { x: 480, y: 380 },
+  { x: 350, y: 200 },
 ];
 
 // 3 parking slots on the right side
