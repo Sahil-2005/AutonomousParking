@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const API_URL = "http://localhost:8000/api/steer";
 const TICK_RATE_MS = 50; // 20 frames per second
@@ -7,13 +7,19 @@ const CAR_LENGTH = 15;   // Distance between axles
 
 function App() {
   const [carState, setCarState] = useState({
-    x: -40,       // Start left of spot (in the street)
-    y: 80,        // Start ahead of parking spot
+    x: -25,       // Start in the driving lane (left of spot)
+    y: 55,        // Start alongside the front parked car
     angle: 0,     // Start parallel to curb (facing UP)
     steering: 0,
   });
 
   const [isRunning, setIsRunning] = useState(false);
+  const carStateRef = useRef(carState);
+
+  // Keep the ref in sync with state
+  useEffect(() => {
+    carStateRef.current = carState;
+  }, [carState]);
 
   // The main simulation loop
   useEffect(() => {
@@ -21,6 +27,9 @@ function App() {
 
     const interval = setInterval(async () => {
       try {
+        // Read latest state from ref (avoids stale closure)
+        const current = carStateRef.current;
+
         // Fetch new steering angle from Python Fuzzy Logic Backend
         const response = await fetch(API_URL, {
           method: "POST",
@@ -28,9 +37,9 @@ function App() {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            x: carState.x,
-            y: carState.y,
-            angle: carState.angle,
+            x: current.x,
+            y: current.y,
+            angle: current.angle,
           }),
         });
 
@@ -50,7 +59,7 @@ function App() {
 
           const newX = prev.x + (SPEED * headingX);
           const newY = prev.y + (SPEED * headingY);
-          
+
           // update vehicle angle
           const newAngleRad = angleRad + ((SPEED / CAR_LENGTH) * Math.tan(steeringRad));
           let newAngleDeg = (newAngleRad * 180) / Math.PI;
@@ -58,6 +67,8 @@ function App() {
           // Normalize angle to -180...180
           if (newAngleDeg > 180) newAngleDeg -= 360;
           if (newAngleDeg < -180) newAngleDeg += 360;
+
+
 
           return {
             x: newX,
@@ -73,25 +84,32 @@ function App() {
     }, TICK_RATE_MS);
 
     return () => clearInterval(interval);
-  }, [isRunning, carState]); // Depend on car state so it captures the latest state to send
+  }, [isRunning]); // Only depend on isRunning — ref handles latest state
+
+  // Auto-stop when the car is parked (x near 0, angle small enough, y in target zone)
+  useEffect(() => {
+    if (isRunning && Math.abs(carState.x) < 7 && Math.abs(carState.angle) < 7 && carState.y < 5 && carState.y > -50) {
+      setIsRunning(false);
+    }
+  }, [carState, isRunning]);
 
   // Map coordinates to CSS pixels
   const scale = 3;
   // Target spot visual center is left=470px, top=260px.
   // Physical x=0 maps to 470, y=0 maps to 260
-  const renderX = 470 + (carState.x * scale); 
-  const renderY = 260 - (carState.y * scale); 
+  const renderX = 470 + (carState.x * scale);
+  const renderY = 260 - (carState.y * scale);
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-8">
       <h1 className="text-3xl font-bold mb-4">Autonomous Parallel Parking Controller</h1>
       <p className="text-gray-400 mb-8">Fuzzy Logic Controller simulation via Python + React</p>
-      
+
       {/* Simulation Area */}
       <div className="relative bg-gray-600 border-2 border-gray-400 rounded-lg overflow-hidden w-[600px] h-[600px] mb-8 shadow-inner shadow-black">
         {/* Curbside Marking */}
         <div className="absolute top-0 right-[150px] w-2 h-full bg-yellow-500 rounded-full opacity-70 border-r-2 border-yellow-300"></div>
-        
+
         {/* Spot markings */}
         <div className="absolute top-[200px] right-[100px] border-2 border-white border-dashed w-[60px] h-[120px] opacity-30">
           <span className="absolute w-full text-center text-xs top-1/2 -translate-y-1/2 font-mono">Target</span>
@@ -99,16 +117,16 @@ function App() {
 
         {/* Parked Car 1 (Front) */}
         <div className="absolute top-[40px] right-[100px] w-[50px] h-[100px] bg-red-800 rounded shadow-md border border-black z-10 flex flex-col items-center justify-center">
-            <div className="w-full h-1/4 bg-gray-900 rounded-sm mt-2 opacity-50"></div>
+          <div className="w-full h-1/4 bg-gray-900 rounded-sm mt-2 opacity-50"></div>
         </div>
 
         {/* Parked Car 2 (Behind) */}
         <div className="absolute top-[360px] right-[100px] w-[50px] h-[100px] bg-red-800 rounded shadow-md border border-black z-10 flex flex-col items-center justify-center">
-            <div className="w-full h-1/4 bg-gray-900 rounded-sm mt-2 opacity-50"></div>
+          <div className="w-full h-1/4 bg-gray-900 rounded-sm mt-2 opacity-50"></div>
         </div>
 
         {/* User Autonomous Vehicle */}
-        <div 
+        <div
           className="absolute w-[50px] h-[100px] bg-blue-500 rounded-xl shadow-lg border-2 border-blue-300 z-20 flex flex-col items-center transition-all duration-75"
           style={{
             left: `${renderX}px`,
@@ -116,16 +134,16 @@ function App() {
             transform: `translate(-50%, -50%) rotate(${-carState.angle}deg)`,
           }}
         >
-            <div className="flex-1 w-full bg-blue-500 rounded-t-xl overflow-hidden">
-                <div className="w-full h-[20px] bg-cyan-900 mt-4 opacity-80 border-t border-cyan-400"></div>
+          <div className="flex-1 w-full bg-blue-500 rounded-t-xl overflow-hidden">
+            <div className="w-full h-[20px] bg-cyan-900 mt-4 opacity-80 border-t border-cyan-400"></div>
+          </div>
+          <div className="flex-1 w-full bg-blue-500 rounded-b-xl overflow-hidden flex flex-col justify-end">
+            <div className="w-full h-[15px] bg-red-900 mb-2 opacity-80 border-b border-red-500"></div>
+            <div className="absolute top-1 w-full flex justify-between px-1">
+              <div className="w-3 h-2 bg-yellow-200 blur-sm rounded-full"></div>
+              <div className="w-3 h-2 bg-yellow-200 blur-sm rounded-full"></div>
             </div>
-            <div className="flex-1 w-full bg-blue-500 rounded-b-xl overflow-hidden flex flex-col justify-end">
-                <div className="w-full h-[15px] bg-red-900 mb-2 opacity-80 border-b border-red-500"></div>
-                <div className="absolute top-1 w-full flex justify-between px-1">
-                    <div className="w-3 h-2 bg-yellow-200 blur-sm rounded-full"></div>
-                    <div className="w-3 h-2 bg-yellow-200 blur-sm rounded-full"></div>
-                </div>
-            </div>
+          </div>
         </div>
       </div>
 
@@ -150,16 +168,16 @@ function App() {
       </div>
 
       <div className="mt-8 space-x-4">
-        <button 
+        <button
           onClick={() => setIsRunning(!isRunning)}
           className={"px-6 py-3 rounded-lg font-bold transition-colors " + (isRunning ? '"bg-red-500 hover:bg-red-600 outline-none"' : '"bg-green-500 hover:bg-green-600 outline-none"')}
         >
           {isRunning ? "Stop Simulation" : "Start Simulation"}
         </button>
-        <button 
+        <button
           onClick={() => {
             setIsRunning(false);
-            setCarState({x: -40, y: 80, angle: 0, steering: 0});
+            setCarState({ x: -25, y: 55, angle: 0, steering: 0 });
           }}
           className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-bold transition-colors outline-none"
         >
