@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List
 import numpy as np
 import skfuzzy as fuzz
 from skfuzzy import control as ctrl
+import math
 
 app = FastAPI()
 
@@ -16,92 +18,143 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class Obstacle(BaseModel):
+    x: float
+    y: float
+
+
 class CarState(BaseModel):
     x: float
     y: float
-    angle: float
+    angle: float        # heading in degrees: 0=right, positive=clockwise (screen coords)
+    goal_x: float
+    goal_y: float
+    obstacles: List[Obstacle]
 
-# --- Fuzzy Logic Setup ---
-# Only x_pos and angle are used as fuzzy inputs.
-# y_pos is handled with a hard threshold in the API to avoid collisions.
 
-# Antecedents (Inputs)
-x_pos = ctrl.Antecedent(np.arange(-100, 101, 1), 'x_pos')
-angle = ctrl.Antecedent(np.arange(-180, 181, 1), 'angle')
+# --- Helper ---
+def normalize_angle(angle):
+    """Normalize angle to [-180, 180] range."""
+    while angle > 180:
+        angle -= 360
+    while angle < -180:
+        angle += 360
+    return angle
 
-# Consequent (Output)
+
+# ===================================
+#  FUZZY LOGIC SETUP
+# ===================================
+
+# --- Antecedents (Inputs) ---
+angle_to_goal  = ctrl.Antecedent(np.arange(-180, 181, 1), 'angle_to_goal')
+obstacle_dist  = ctrl.Antecedent(np.arange(0, 501, 1), 'obstacle_dist')
+obstacle_angle = ctrl.Antecedent(np.arange(-180, 181, 1), 'obstacle_angle')
+
+# --- Consequent (Output) ---
 steering = ctrl.Consequent(np.arange(-45, 46, 1), 'steering')
 
-# --- Membership Functions ---
+# ===================================
+#  MEMBERSHIP FUNCTIONS
+# ===================================
 
-# X Position: 0 = center of target spot. Negative = left (in street). Positive = right (on curb).
-x_pos['far_left']  = fuzz.trapmf(x_pos.universe, [-100, -100, -20, -10])
-x_pos['left']      = fuzz.trimf(x_pos.universe, [-20, -10, 0])
-x_pos['good']      = fuzz.trimf(x_pos.universe, [-5, 0, 5])
-x_pos['right']     = fuzz.trapmf(x_pos.universe, [0, 10, 100, 100])
+# angle_to_goal: difference between car heading and direction to goal
+# Negative = goal is counter-clockwise (left), Positive = goal is clockwise (right)
+angle_to_goal['neg_large'] = fuzz.trapmf(angle_to_goal.universe, [-180, -180, -50, -20])
+angle_to_goal['neg_small'] = fuzz.trimf(angle_to_goal.universe, [-35, -15, 0])
+angle_to_goal['zero']      = fuzz.trimf(angle_to_goal.universe, [-12, 0, 12])
+angle_to_goal['pos_small'] = fuzz.trimf(angle_to_goal.universe, [0, 15, 35])
+angle_to_goal['pos_large'] = fuzz.trapmf(angle_to_goal.universe, [20, 50, 180, 180])
 
-# Angle: 0 = pointing straight up (parallel to curb). Positive = nose pointing left.
-# Overlapping zones prevent dead spots where no rule fires.
-angle['right_facing'] = fuzz.trapmf(angle.universe, [-180, -180, -8, 0])
-angle['aligned']      = fuzz.trimf(angle.universe, [-8, 0, 8])
-angle['left_moderate']= fuzz.trimf(angle.universe, [3, 15, 35])
-angle['left_steep']   = fuzz.trapmf(angle.universe, [20, 35, 180, 180])
+# obstacle_dist: distance to nearest obstacle in the forward hemisphere
+obstacle_dist['very_close'] = fuzz.trapmf(obstacle_dist.universe, [0, 0, 40, 70])
+obstacle_dist['close']      = fuzz.trimf(obstacle_dist.universe, [50, 90, 140])
+obstacle_dist['far']        = fuzz.trapmf(obstacle_dist.universe, [110, 170, 500, 500])
 
-# Steering: Negative = turn wheels right, Positive = turn wheels left.
-steering['hard_right']   = fuzz.trapmf(steering.universe, [-45, -45, -30, -15])
-steering['slight_right'] = fuzz.trimf(steering.universe, [-25, -10, 0])
-steering['straight']     = fuzz.trimf(steering.universe, [-10, 0, 10])
-steering['slight_left']  = fuzz.trimf(steering.universe, [0, 15, 30])
-steering['hard_left']    = fuzz.trapmf(steering.universe, [15, 30, 45, 45])
+# obstacle_angle: relative angle to nearest obstacle from car heading
+# Negative = obstacle to the left, Positive = obstacle to the right
+obstacle_angle['left']  = fuzz.trapmf(obstacle_angle.universe, [-180, -180, -30, 0])
+obstacle_angle['ahead'] = fuzz.trimf(obstacle_angle.universe, [-35, 0, 35])
+obstacle_angle['right'] = fuzz.trapmf(obstacle_angle.universe, [0, 30, 180, 180])
 
-# --- Fuzzy Rules ---
-# Full 4x4 matrix covering every (x_pos, angle) combination.
+# steering: output steering angle
+# Negative = turn left (counter-clockwise), Positive = turn right (clockwise)
+steering['hard_left']  = fuzz.trapmf(steering.universe, [-45, -45, -35, -20])
+steering['left']       = fuzz.trimf(steering.universe, [-30, -15, 0])
+steering['straight']   = fuzz.trimf(steering.universe, [-8, 0, 8])
+steering['right']      = fuzz.trimf(steering.universe, [0, 15, 30])
+steering['hard_right'] = fuzz.trapmf(steering.universe, [20, 35, 45, 45])
+
+# ===================================
+#  FUZZY RULES
+# ===================================
 rules = [
-    # far_left: car is still in the street — steer hard right to swing rear toward spot
-    ctrl.Rule(x_pos['far_left'] & angle['right_facing'], steering['hard_right']),
-    ctrl.Rule(x_pos['far_left'] & angle['aligned'], steering['hard_right']),
-    ctrl.Rule(x_pos['far_left'] & angle['left_moderate'], steering['hard_right']),
-    ctrl.Rule(x_pos['far_left'] & angle['left_steep'], steering['straight']),
+    # ===== GOAL SEEKING (obstacles are far away) =====
+    ctrl.Rule(obstacle_dist['far'] & angle_to_goal['neg_large'], steering['hard_left']),
+    ctrl.Rule(obstacle_dist['far'] & angle_to_goal['neg_small'], steering['left']),
+    ctrl.Rule(obstacle_dist['far'] & angle_to_goal['zero'],      steering['straight']),
+    ctrl.Rule(obstacle_dist['far'] & angle_to_goal['pos_small'], steering['right']),
+    ctrl.Rule(obstacle_dist['far'] & angle_to_goal['pos_large'], steering['hard_right']),
 
-    # left: rear is approaching the spot — begin counter-steering
-    ctrl.Rule(x_pos['left'] & angle['right_facing'], steering['hard_right']),
-    ctrl.Rule(x_pos['left'] & angle['aligned'], steering['straight']),
-    ctrl.Rule(x_pos['left'] & angle['left_moderate'], steering['hard_left']),
-    ctrl.Rule(x_pos['left'] & angle['left_steep'], steering['hard_left']),
+    # ===== OBSTACLE AVOIDANCE — very close (emergency) =====
+    # Obstacle to the left  → hard right to dodge
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['left'],  steering['hard_right']),
+    # Obstacle to the right → hard left to dodge
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['right'], steering['hard_left']),
+    # Obstacle dead ahead → dodge toward the goal's side
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['ahead'] & angle_to_goal['neg_large'], steering['hard_left']),
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['ahead'] & angle_to_goal['neg_small'], steering['hard_left']),
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['ahead'] & angle_to_goal['zero'],      steering['hard_left']),
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['ahead'] & angle_to_goal['pos_small'], steering['hard_right']),
+    ctrl.Rule(obstacle_dist['very_close'] & obstacle_angle['ahead'] & angle_to_goal['pos_large'], steering['hard_right']),
 
-    # good: car is laterally in position — straighten out
-    ctrl.Rule(x_pos['good'] & angle['right_facing'], steering['slight_right']),
-    ctrl.Rule(x_pos['good'] & angle['aligned'], steering['straight']),
-    ctrl.Rule(x_pos['good'] & angle['left_moderate'], steering['hard_left']),
-    ctrl.Rule(x_pos['good'] & angle['left_steep'], steering['hard_left']),
-
-    # right: car drifted past center toward curb — pull back
-    ctrl.Rule(x_pos['right'] & angle['right_facing'], steering['slight_left']),
-    ctrl.Rule(x_pos['right'] & angle['aligned'], steering['hard_left']),
-    ctrl.Rule(x_pos['right'] & angle['left_moderate'], steering['hard_left']),
-    ctrl.Rule(x_pos['right'] & angle['left_steep'], steering['hard_left']),
+    # ===== OBSTACLE AVOIDANCE — close (moderate) =====
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['left'],  steering['right']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['right'], steering['left']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['ahead'] & angle_to_goal['neg_large'], steering['hard_left']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['ahead'] & angle_to_goal['neg_small'], steering['left']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['ahead'] & angle_to_goal['zero'],      steering['left']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['ahead'] & angle_to_goal['pos_small'], steering['right']),
+    ctrl.Rule(obstacle_dist['close'] & obstacle_angle['ahead'] & angle_to_goal['pos_large'], steering['hard_right']),
 ]
 
-# Control System Setup
+# Build the Control System
 steering_ctrl = ctrl.ControlSystem(rules)
 steering_sim = ctrl.ControlSystemSimulation(steering_ctrl)
 
-# Y threshold: the car must back straight past the front parked car
-# before the fuzzy steering kicks in. This prevents collision.
-Y_THRESHOLD = 30
 
 @app.post("/api/steer")
 def steer_car(state: CarState):
     try:
-        # Phase 1: If the car is still alongside/ahead of the front parked car,
-        # go straight backward to clear it first.
-        if state.y > Y_THRESHOLD:
-            return {"steering_angle": 0}
+        # 1. Compute angle to goal relative to car heading
+        dx_goal = state.goal_x - state.x
+        dy_goal = state.goal_y - state.y
+        goal_direction = math.degrees(math.atan2(dy_goal, dx_goal))
+        atg = normalize_angle(goal_direction - state.angle)
 
-        # Phase 2: Use fuzzy logic for the S-curve parking maneuver
-        steering_sim.input['x_pos'] = max(-100, min(100, state.x))
-        steering_sim.input['angle'] = max(-180, min(180, state.angle))
+        # 2. Find the nearest obstacle in the forward hemisphere (±90°)
+        nearest_dist = 500.0
+        nearest_angle = 0.0
 
+        for obs in state.obstacles:
+            dx = obs.x - state.x
+            dy = obs.y - state.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            obs_direction = math.degrees(math.atan2(dy, dx))
+            rel_angle = normalize_angle(obs_direction - state.angle)
+
+            # Only consider obstacles roughly in front of the car
+            if abs(rel_angle) <= 90 and dist < nearest_dist:
+                nearest_dist = dist
+                nearest_angle = rel_angle
+
+        # 3. Feed inputs to the fuzzy controller (clamped to universe ranges)
+        steering_sim.input['angle_to_goal']  = max(-180, min(180, atg))
+        steering_sim.input['obstacle_dist']  = max(0, min(500, nearest_dist))
+        steering_sim.input['obstacle_angle'] = max(-180, min(180, nearest_angle))
+
+        # 4. Compute the fuzzy output
         try:
             steering_sim.compute()
             steer = steering_sim.output['steering']
@@ -111,8 +164,9 @@ def steer_car(state: CarState):
         return {"steering_angle": round(steer, 2)}
 
     except Exception as e:
-        print("Error: ", str(e))
+        print("Error:", str(e))
         return {"error": str(e), "steering_angle": 0}
+
 
 if __name__ == "__main__":
     import uvicorn
