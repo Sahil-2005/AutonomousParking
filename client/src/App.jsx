@@ -16,6 +16,10 @@ const OBSTACLES = [
   { x: 450, y: 160 },
   { x: 480, y: 380 },
   { x: 350, y: 200 },
+  { x: 450, y: 90 },
+  { x: 450, y: 270 },
+  { x: 450, y: 217 },
+  { x: 450, y: 380 },
 ];
 
 // 3 parking slots on the right side
@@ -239,12 +243,11 @@ function App() {
               onClick={() => handleSlotClick(slot)}
               className={`absolute border-2 border-dashed rounded-lg cursor-pointer transition-all duration-300
                 flex items-center justify-center select-none
-                ${
-                  isSelected
-                    ? isParked
-                      ? "border-green-400 bg-green-500/20 shadow-lg shadow-green-500/20"
-                      : "border-cyan-400 bg-cyan-500/15 animate-pulse shadow-lg shadow-cyan-500/20"
-                    : "border-white/25 hover:border-white/50 hover:bg-white/5"
+                ${isSelected
+                  ? isParked
+                    ? "border-green-400 bg-green-500/20 shadow-lg shadow-green-500/20"
+                    : "border-cyan-400 bg-cyan-500/15 animate-pulse shadow-lg shadow-cyan-500/20"
+                  : "border-white/25 hover:border-white/50 hover:bg-white/5"
                 }`}
               style={{
                 left: slot.x - 30,
@@ -254,13 +257,12 @@ function App() {
               }}
             >
               <span
-                className={`text-xs font-bold tracking-wide ${
-                  isSelected
-                    ? isParked
-                      ? "text-green-300"
-                      : "text-cyan-300"
-                    : "text-white/40"
-                }`}
+                className={`text-xs font-bold tracking-wide ${isSelected
+                  ? isParked
+                    ? "text-green-300"
+                    : "text-cyan-300"
+                  : "text-white/40"
+                  }`}
               >
                 {slot.label}
               </span>
